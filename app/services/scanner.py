@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.services.icmp import ping_host
 from app.services.arp import get_arp_table
 from app.services.dns import get_hostname
-
+from app.services.vendor import get_vendor
 
 def get_network_hosts(cidr: str) -> list[str]:
     network = ipaddress.ip_network(
@@ -48,6 +48,7 @@ def scan_network(
         ip = device["ip"]
 
         device["mac"] = arp_table.get(ip)
+        device["vendor"] = get_vendor(device["mac"])
         device["hostname"] = None
 
         if (
