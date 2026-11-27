@@ -284,7 +284,7 @@ Never commit the working `.env` file or real credentials.
 
 ## Testing
 
-InfraPulse currently includes 88 automated tests.
+InfraPulse currently includes 98 automated tests.
 
 The test suite covers:
 
@@ -461,3 +461,62 @@ python -m uvicorn app.main:app --reload
 - Prometheus notification delivery requires Alertmanager.
 - Authentication is not implemented.
 - Monitoring thresholds require production tuning.
+## Grafana Dashboards
+
+InfraPulse provides a provisioned Grafana dashboard
+for infrastructure monitoring and observability.
+
+### Features
+
+- Grafana 13.3.2 Docker deployment
+- Automatic Prometheus data source provisioning
+- Dashboard configuration stored in Git
+- Infrastructure Overview with 11 panels
+- Real-time application availability
+- Device and service inventory metrics
+- Monitoring checks per minute
+- Average check duration
+- P95 and P99 check duration
+- Incident visualization
+- Monitoring scheduler statistics
+- Persistent Grafana storage
+
+### Start Grafana
+
+```bash
+docker compose up -d grafana
+```
+
+### Access
+
+- Grafana: http://127.0.0.1:3000
+- Dashboard: http://127.0.0.1:3000/d/infrapulse-overview
+
+On a fresh installation, sign in using the default
+admin credentials and change the password immediately.
+
+### Configuration
+
+Grafana configuration is stored in:
+
+- monitoring/grafana/provisioning/datasources/
+- monitoring/grafana/provisioning/dashboards/
+- monitoring/grafana/dashboards/
+
+The dashboard is managed as code and automatically
+provisioned when Grafana starts.
+
+### Validation
+
+- 10 automated dashboard configuration tests
+- Dashboard persistence after container recreation
+- Grafana Health API verification
+- Prometheus data source integration
+
+### Current limitations
+
+- Metrics are aggregated by monitoring protocol.
+- Per-device dashboards are not implemented.
+- Registered service counts include disabled services.
+- Dashboard configuration is managed through JSON.
+- Grafana is exposed only on the local interface.
