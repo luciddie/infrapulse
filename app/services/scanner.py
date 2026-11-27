@@ -18,11 +18,10 @@ def get_network_hosts(cidr: str) -> list[str]:
     if network.version != 4:
         raise ValueError("Only IPv4 networks are supported")
 
-    if network.num_addresses > 256:
-        raise ValueError("Network range is too large")
+    if network.num_addresses > 4096:
+        raise ValueError("Maximum supported network size is /20")
 
     return [str(host) for host in network.hosts()]
-
 
 def select_interface(
     cidr: str,
@@ -72,17 +71,27 @@ def select_interface(
 def scan_network(
     cidr: str,
     interface_ip: str | None = None,
-    resolve_dns: bool = False
+    resolve_dns: bool = False,
+    workers: int = 8,
+    allow_large_scan: bool = False
 ) -> list[dict]:
 
     hosts = get_network_hosts(cidr)
+
+    if not 1 <= workers <= 16:
+        raise ValueError("Workers must be between 1 and 16")
+
+    if len(hosts) > 254 and not allow_large_scan:
+        raise ValueError(
+            "Large network scan requires explicit confirmation"
+        )
 
     interface = select_interface(cidr, interface_ip)
 
     if interface:
         interface_ip = interface["ip"]
 
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         results = list(executor.map(ping_host, hosts))
 
     arp_table = get_arp_table(interface_ip)
@@ -128,6 +137,19 @@ def main():
     parser.add_argument(
         "--list-interfaces",
         action="store_true"
+    )
+
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of parallel workers (1-16)"
+    )
+
+    parser.add_argument(
+        "--allow-large-scan",
+        action="store_true",
+        help="Explicitly allow scanning large networks"
     )
 
     args = parser.parse_args()
