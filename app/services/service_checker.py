@@ -1,5 +1,6 @@
 import logging
 
+from time import perf_counter
 from ipaddress import IPv4Address
 from urllib.parse import urlsplit
 
@@ -8,6 +9,11 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.models.device import Device
 from app.models.service import Service
+
+from app.metrics import (
+    record_check,
+    record_incident
+)
 
 from app.repositories.services import create_service_check
 
@@ -27,6 +33,8 @@ logger = logging.getLogger("infrapulse.service")
 
 
 def check_service(service_id: int) -> dict:
+
+    started = perf_counter()
 
     with SessionLocal() as db:
 
@@ -143,7 +151,18 @@ def check_service(service_id: int) -> dict:
             "incident_event": incident_event
         }
 
+    record_check(
+        protocol=response["protocol"],
+        status=response["status"],
+        duration=perf_counter() - started
+    )
+
     if incident_event is not None:
+
+        record_incident(
+            incident_type="service",
+            event=incident_event
+        )
 
         try:
 
