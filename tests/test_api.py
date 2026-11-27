@@ -52,7 +52,6 @@ def test_invalid_workers():
 
     assert response.status_code == 422
 
-
 def test_large_scan_rejected():
     response = client.post(
         "/api/scan",
@@ -74,3 +73,60 @@ def test_results_not_found():
     )
 
     assert response.status_code == 404
+def test_successful_scan(monkeypatch):
+    import time
+    from app.services import scan_manager
+
+    def fake_scan(**kwargs):
+        return [
+            {
+                "ip": "127.0.0.1",
+                "status": "online",
+                "latency_ms": 1.0,
+                "latency_upper_bound_ms": None,
+                "mac": None,
+                "vendor": None,
+                "hostname": None
+            }
+        ]
+
+    monkeypatch.setattr(
+        scan_manager,
+        "scan_network",
+        fake_scan
+    )
+
+    response = client.post(
+        "/api/scan",
+        json={"network": "127.0.0.1/32"}
+    )
+
+    assert response.status_code == 202
+
+    scan_id = response.json()["scan_id"]
+
+    for _ in range(100):
+        response = client.get(
+            f"/api/scans/{scan_id}"
+        )
+
+        status = response.json()["status"]
+
+        if status in ("completed", "failed"):
+            break
+
+        time.sleep(0.02)
+
+    assert status == "completed"
+
+    response = client.get(
+        f"/api/scans/{scan_id}/results"
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["scanned_hosts"] == 1
+    assert data["online_devices"] == 1
+    assert data["devices"][0]["ip"] == "127.0.0.1"
