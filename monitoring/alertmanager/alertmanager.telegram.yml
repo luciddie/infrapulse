@@ -1,0 +1,56 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by: ["alertname", "severity"]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+
+  routes:
+    - receiver: telegram
+      matchers:
+        - 'alertname=~"InfraPulseDown|MonitoringSchedulerStalled|HighCheckDuration"'
+
+receivers:
+  - name: default
+
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /run/secrets/telegram_bot_token
+        chat_id_file: /run/secrets/telegram_chat_id
+        send_resolved: true
+        parse_mode: ""
+        message: |
+          {{ if eq .Status "firing" }}🔴 INFRAPULSE — INCIDENT
+          {{ else }}🟢 INFRAPULSE — RECOVERED
+          {{ end }}
+          Status: {{ .Status | toUpper }}
+          ━━━━━━━━━━━━━━━━━━━━
+          {{ range .Alerts }}
+          Alert: {{ .Labels.alertname }}
+          Severity: {{ .Labels.severity | toUpper }}
+          {{ if .Labels.instance }}Instance: {{ .Labels.instance }}
+          {{ end }}
+          {{ if eq .Status "firing" }}
+          Summary: {{ .Annotations.summary }}
+          Details: {{ .Annotations.description }}
+          Started: {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}
+          {{ else }}
+          Summary: Alert condition cleared.
+          Started: {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}
+          Resolved: {{ .EndsAt.Format "2006-01-02 15:04:05 MST" }}
+          {{ end }}
+          {{ end }}
+          ━━━━━━━━━━━━━━━━━━━━
+          InfraPulse Monitoring System
+          Powered by Prometheus & Alertmanager
+inhibit_rules:
+  - source_matchers:
+      - 'alertname="InfraPulseDown"'
+    target_matchers:
+      - 'alertname=~"MonitoringSchedulerStalled|HighCheckDuration"'
+    equal:
+      - instance
+      - job

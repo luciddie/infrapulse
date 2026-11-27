@@ -284,7 +284,7 @@ Never commit the working `.env` file or real credentials.
 
 ## Testing
 
-InfraPulse currently includes 98 automated tests.
+InfraPulse currently includes 110 automated tests.
 
 The test suite covers:
 
@@ -520,3 +520,84 @@ provisioned when Grafana starts.
 - Registered service counts include disabled services.
 - Dashboard configuration is managed through JSON.
 - Grafana is exposed only on the local interface.
+## Alertmanager and Independent Notifications
+
+InfraPulse integrates Prometheus Alertmanager for
+independent infrastructure alert delivery.
+
+### Features
+
+- Alertmanager 0.35.1 Docker deployment
+- Prometheus alert routing
+- Telegram FIRING and RESOLVED notifications
+- Custom notification templates
+- Alert grouping and deduplication
+- Maintenance silences
+- Alert inhibition rules
+- Persistent Alertmanager storage
+- Optional Telegram integration
+- File-based secret management
+- Alertmanager self-monitoring
+
+### Standard deployment
+
+Telegram credentials are not required for the
+standard monitoring stack.
+
+```bash
+docker compose up -d
+```
+
+### Telegram-enabled deployment
+
+Configure the Telegram bot token and chat ID in:
+
+- secrets/telegram_bot_token
+- secrets/telegram_chat_id
+
+Each file must contain its corresponding value.
+
+The secrets directory is excluded from Git.
+
+Start the Telegram-enabled stack:
+
+```bash
+docker compose -f compose.yml -f compose.telegram.yml up -d
+```
+
+Always use both Compose files when updating
+the Telegram-enabled deployment.
+
+### Notification routing
+
+| Alert | Notification provider |
+|---|---|
+| InfraPulseDown | Alertmanager |
+| MonitoringSchedulerStalled | Alertmanager |
+| HighCheckDuration | Alertmanager |
+| Device incidents | InfraPulse |
+| Service incidents | InfraPulse |
+
+### Monitoring endpoints
+
+- Alertmanager: http://127.0.0.1:9093
+- Prometheus: http://127.0.0.1:9090
+- Grafana: http://127.0.0.1:3000
+
+### Validation
+
+- 12 automated Alertmanager configuration tests
+- Verified FIRING and RESOLVED Telegram delivery
+- Prometheus configuration validation
+- Alertmanager configuration validation
+- Silence lifecycle verification
+
+### Current limitations
+
+- Single-node Alertmanager deployment.
+- Telegram requires external API connectivity.
+- Local secret files are not encrypted at rest.
+- Direct application notifications remain separate.
+- Scheduler alerts assume monitoring is enabled.
+- Inhibition behavior requires additional runtime testing.
+- Updated notification templates require delivery testing.

@@ -29,7 +29,7 @@ groups:
           description: "InfraPulse has open service incidents."
 
       - alert: HighCheckDuration
-        expr: histogram_quantile(0.95, sum by (le, protocol) (rate(infrapulse_check_duration_seconds_bucket[5m]))) > 2
+        expr: histogram_quantile(0.95, sum by (le, protocol, job, instance) (rate(infrapulse_check_duration_seconds_bucket{job="infrapulse"}[5m]))) > 2
         for: 2m
         labels:
           severity: warning
@@ -38,7 +38,7 @@ groups:
           description: "P95 check duration exceeds 2 seconds."
 
       - alert: MonitoringSchedulerStalled
-        expr: (increase(infrapulse_monitoring_cycles_total{status="success"}[5m]) == 0 or absent(infrapulse_monitoring_cycles_total{status="success"})) and on(job, instance) (up{job="infrapulse"} == 1)
+        expr: (up{job="infrapulse"} == 1) unless on(job, instance) (increase(infrapulse_monitoring_cycles_total{job="infrapulse",status="success"}[5m]) > 0)
         for: 2m
         labels:
           severity: critical
