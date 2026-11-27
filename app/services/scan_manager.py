@@ -1,83 +1,142 @@
-from uuid import uuid4
-from datetime import datetime, timezone
-from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+from uuid import UUID, uuid4
 
+from app.database import SessionLocal
 from app.services.scanner import scan_network
+from app.repositories import scans
 
 
 class ScanManager:
 
     def __init__(self):
-        self.scans = {}
         self.lock = Lock()
-        self.executor = ThreadPoolExecutor(max_workers=1)
-        self.max_history = 10
+        self.executor = ThreadPoolExecutor(
+            max_workers=1
+        )
+        self.active_scan_id = None
 
-    def start_scan(self, **params):
+    def start_scan(self, **params) -> str:
         with self.lock:
-            active = any(
-                scan["status"] in ("pending", "running")
-                for scan in self.scans.values()
-            )
+            if self.active_scan_id is not None:
+                raise RuntimeError(
+                    "Another scan is already running"
+                )
 
-            if active:
-                raise RuntimeError("Another scan is already running")
+            scan_id = uuid4()
 
-            while len(self.scans) >= self.max_history:
-                oldest = next(iter(self.scans))
-                del self.scans[oldest]
+            with SessionLocal.begin() as db:
+                scans.create_scan(
+                    db,
+                    scan_id,
+                    params["cidr"]
+                )
 
-            scan_id = str(uuid4())
+            self.active_scan_id = scan_id
 
-            self.scans[scan_id] = {
-                "id": scan_id,
-                "status": "pending",
-                "network": params["cidr"],
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "finished_at": None,
-                "results": None,
-                "error": None
-            }
+            try:
+                self.executor.submit(
+                    self._run_scan,
+                    scan_id,
+                    params
+                )
+            except Exception as exc:
+                self.active_scan_id = None
 
-            self.executor.submit(
-                self._run_scan,
-                scan_id,
-                params
-            )
+                with SessionLocal.begin() as db:
+                    scans.fail_scan(
+                        db, scan_id, str(exc)
+                    )
 
-        return scan_id
+                raise
 
-    def _run_scan(self, scan_id, params):
-        with self.lock:
-            self.scans[scan_id]["status"] = "running"
+            return str(scan_id)
+
+    def _run_scan(
+        self,
+        scan_id: UUID,
+        params: dict
+    ) -> None:
 
         try:
+            with SessionLocal.begin() as db:
+                scans.mark_scan_running(
+                    db, scan_id
+                )
+
             results = scan_network(**params)
 
-            with self.lock:
-                self.scans[scan_id].update({
-                    "status": "completed",
-                    "results": results,
-                    "finished_at": datetime.now(
-                        timezone.utc
-                    ).isoformat()
-                })
+            with SessionLocal.begin() as db:
+                scans.complete_scan(
+                    db,
+                    scan_id,
+                    results
+                )
 
-        except Exception as error:
-            with self.lock:
-                self.scans[scan_id].update({
-                    "status": "failed",
-                    "error": str(error),
-                    "finished_at": datetime.now(
-                        timezone.utc
-                    ).isoformat()
-                })
+        except Exception as exc:
+            with SessionLocal.begin() as db:
+                scans.fail_scan(
+                    db,
+                    scan_id,
+                    str(exc)
+                )
 
-    def get_scan(self, scan_id):
-        with self.lock:
-            scan = self.scans.get(scan_id)
-            return scan.copy() if scan else None
+        finally:
+            with self.lock:
+                self.active_scan_id = None
+
+    def get_scan(
+        self,
+        scan_id: str
+    ) -> dict | None:
+
+        try:
+            scan_uuid = UUID(scan_id)
+        except ValueError:
+            return None
+
+        with SessionLocal() as db:
+            scan = scans.get_scan(
+                db, scan_uuid
+            )
+
+            if scan is None:
+                return None
+
+            results = None
+
+            if scan.status == "completed":
+                records = scans.get_scan_results(
+                    db, scan_uuid
+                )
+
+                results = [
+                    {
+                        "ip": record.ip_address,
+                        "mac": record.mac_address,
+                        "hostname": record.hostname,
+                        "vendor": record.vendor,
+                        "status": record.status,
+                        "latency_ms": record.latency_ms,
+                        "latency_upper_bound_ms":
+                            record.latency_upper_bound_ms
+                    }
+                    for record in records
+                ]
+
+            return {
+                "id": str(scan.id),
+                "network": scan.network,
+                "status": scan.status,
+                "created_at": scan.created_at.isoformat(),
+                "finished_at": (
+                    scan.finished_at.isoformat()
+                    if scan.finished_at
+                    else None
+                ),
+                "error": scan.error,
+                "results": results
+            }
 
 
 scan_manager = ScanManager()

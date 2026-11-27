@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from app.api.network import router as network_router
+from app.api.devices import router as devices_router
+from app.api.history import router as history_router
 
 
 app = FastAPI(
@@ -10,7 +12,8 @@ app = FastAPI(
 
 
 app.include_router(network_router)
-
+app.include_router(devices_router)
+app.include_router(history_router)
 
 @app.get("/")
 def root():
