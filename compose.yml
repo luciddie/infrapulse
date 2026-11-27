@@ -21,6 +21,58 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: infrapulse:dev
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: infrapulse
+      DB_USER: infrapulse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: infrapulse:dev
+    container_name: infrapulse-app
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: infrapulse
+      DB_USER: infrapulse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      MONITORING_ENABLED: ${MONITORING_ENABLED:-false}
+      MONITORING_INTERVAL: ${MONITORING_INTERVAL:-60}
+      MONITORING_WORKERS: ${MONITORING_WORKERS:-4}
+      INCIDENT_FAILURE_THRESHOLD: ${INCIDENT_FAILURE_THRESHOLD:-3}
+      SERVICE_INCIDENT_FAILURE_THRESHOLD: ${SERVICE_INCIDENT_FAILURE_THRESHOLD:-3}
+      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+
   prometheus:
     image: prom/prometheus:v3.16.0
     container_name: infrapulse-prometheus

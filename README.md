@@ -234,6 +234,7 @@ Never commit the working `.env` file or real credentials.
 | --- | --- |
 | GET | / |
 | GET | /health |
+| GET | /ready |
 
 ### Network Discovery
 
@@ -284,7 +285,7 @@ Never commit the working `.env` file or real credentials.
 
 ## Testing
 
-InfraPulse currently includes 110 automated tests.
+InfraPulse currently includes 120 automated tests (plus Prometheus alert rule tests).
 
 The test suite covers:
 
@@ -351,8 +352,9 @@ The CI pipeline includes:
 
 ## Current Limitations
 
-- Network interface and ARP discovery are Windows-specific.
-- Monitoring scheduler is designed for a single application process.
+- Linux network discovery inspects the kernel neighbour cache (`ip -j neigh show`) rather than performing privileged raw-socket ARP scanning; in Docker bridge mode, only L2 neighbours on the container's own bridge subnet are visible.
+- Windows `ping_host` does not bind an explicit source IPv4 address (`source_ip` is bound via `ping -I` on Linux only).
+- Monitoring scheduler is designed for a single application process (`--workers 1`).
 - Device identity is currently based on IP address.
 - HTTP monitoring targets must match registered device IPv4 addresses.
 - Availability is calculated from observed checks rather than
@@ -381,10 +383,10 @@ Do not expose the API publicly without additional security controls.
 - [x] Telegram notifications
 - [x] Automated testing
 - [x] Continuous integration configuration
-- [ ] Prometheus metrics exporter
-- [ ] Grafana dashboards
-- [ ] Application Docker image
-- [ ] Full Docker Compose stack
+- [x] Prometheus metrics exporter
+- [x] Grafana dashboards
+- [x] Application Docker image
+- [x] Full Docker Compose stack
 - [ ] Container registry
 - [ ] Continuous deployment
 - [ ] Infrastructure as Code
@@ -601,3 +603,78 @@ the Telegram-enabled deployment.
 - Scheduler alerts assume monitoring is enabled.
 - Inhibition behavior requires additional runtime testing.
 - Updated notification templates require delivery testing.
+
+## Containerization & Docker Compose Deployment
+
+InfraPulse can run as a containerized non-root service (`UID/GID 10001`) alongside PostgreSQL, Prometheus, Grafana, and Alertmanager.
+
+### Prerequisites
+
+- Docker Engine and Docker Compose v2+
+- `.env` created from `.env.example` with a strong `POSTGRES_PASSWORD` (note: local `.env` values override Compose interpolation defaults; Compose explicitly sets `DB_HOST=postgres` for `app` and `migrate`)
+
+### Build & Deploy
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+Startup ordering:
+
+1. `postgres` starts and passes `pg_isready`.
+2. `migrate` runs `alembic upgrade head` as a one-shot container (`restart: "no"`) using the same `infrapulse:dev` image.
+3. `app` starts only after `migrate` exits `0` (`service_completed_successfully`), running Uvicorn with `--workers 1` on `127.0.0.1:8000`.
+
+Monitoring (`MONITORING_ENABLED=false`) and direct Telegram notifications (`TELEGRAM_ENABLED=false`) are disabled by default. Standard deployment does not require `secrets/` or `data/oui.csv`.
+
+For Telegram-enabled Alertmanager notifications:
+
+```bash
+docker compose -f compose.yml -f compose.telegram.yml up -d
+```
+
+For optional MAC vendor OUI lookup in Docker, mount `data/oui.csv` read-only at `/app/data/oui.csv` once the file is present locally.
+
+### Health & Readiness Endpoints
+
+- `GET /health`: Lightweight HTTP liveness probe (`{"status": "healthy"}`).
+- `GET /ready`: Verifies PostgreSQL connectivity (`SELECT 1` with bounded connection, pool, and statement timeouts) and returns `200 {"status": "ready", "database": "connected"}` or sanitized `503`. Note: `/ready` verifies database connectivity, not complete schema/migration compatibility.
+
+### Migrating from Windows Execution to Docker
+
+- **Review `127.0.0.1` monitoring targets**: Existing device and service records pointing to `127.0.0.1` refer to the Windows host when run locally, but refer to the container's own loopback inside Docker.
+- **Linux networking & Docker bridge mode**: `ip -j` interface and neighbour discovery work unprivileged on Linux, but Docker bridge containers cannot ARP-discover physical LAN MACs beyond the bridge gateway.
+- **Windows source-IP binding**: Explicit `interface_ip` binds ICMP via `ping -I` on Linux; Windows `ping_host` uses the OS routing table.
+
+### Prometheus Rule & Isolated Integration Testing
+
+Validate Prometheus config and alert rules using `promtool`:
+
+```bash
+docker run --rm --entrypoint promtool \
+  -v "${PWD}/monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+  -v "${PWD}/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+  -v "${PWD}/tests/prometheus/alerts_test.yml:/etc/prometheus/alerts_test.yml:ro" \
+  prom/prometheus:v3.16.0 test rules /etc/prometheus/alerts_test.yml
+```
+
+Run isolated integration tests (requires `infrapulse:dev` built first via `docker compose build`):
+
+```powershell
+pwsh -NoProfile -File .\scripts\integration\docker_net_test.ps1
+pwsh -NoProfile -File .\scripts\integration\compose_e2e.ps1
+pwsh -NoProfile -File .\scripts\integration\reliability_test.ps1
+```
+
+Integration test isolation guarantees:
+
+- Uses [`compose.integration.yml`](compose.integration.yml) with `internal: true` on `isolated_net` (bridge driver, no host port publishing, no external internet egress).
+- Uses literal test-only credentials (`POSTGRES_PASSWORD=integration_test_only_password`) and `INTEGRATION_*` variables so working `.env` values cannot leak into test containers; Telegram is unconditionally disabled.
+- Generates unique per-run Compose project/network names and removes only project-owned containers, networks, and temporary volumes in `finally` blocks.
+- Limitation: `docker_net_test.ps1`, `compose_e2e.ps1`, and `reliability_test.ps1` target PowerShell (`pwsh`) and Docker Desktop/Engine on the same host where `infrapulse:dev` is built.
+
+### Backup & Rollback
+
+- Take a `pg_dump` backup from `postgres_data` before running schema migrations on production data.
+- To roll back the application container to host execution, run `docker compose stop app`, revert `monitoring/prometheus/prometheus.yml` if needed, and run Uvicorn on the host. Use `alembic downgrade -1` only as a controlled manual operation after verifying data compatibility.

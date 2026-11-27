@@ -1,0 +1,79 @@
+# Isolated integration-testing Compose stack (TEST-ONLY credentials; never use in production)
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: infrapulse
+      POSTGRES_USER: infrapulse
+      # TEST-ONLY credential; intentionally not interpolated from .env
+      POSTGRES_PASSWORD: integration_test_only_password
+    volumes:
+      - postgres_integration_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infrapulse -d infrapulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - isolated_net
+
+  migrate:
+    image: infrapulse:dev
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: infrapulse
+      DB_USER: infrapulse
+      POSTGRES_PASSWORD: integration_test_only_password
+    networks:
+      - isolated_net
+
+  app:
+    image: infrapulse:dev
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: infrapulse
+      DB_USER: infrapulse
+      POSTGRES_PASSWORD: integration_test_only_password
+      MONITORING_ENABLED: ${INTEGRATION_MONITORING_ENABLED:-false}
+      MONITORING_INTERVAL: ${INTEGRATION_MONITORING_INTERVAL:-5}
+      MONITORING_WORKERS: ${INTEGRATION_MONITORING_WORKERS:-2}
+      TELEGRAM_ENABLED: "false"
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_CHAT_ID: ""
+    networks:
+      - isolated_net
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    depends_on:
+      - app
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - isolated_net
+
+volumes:
+  postgres_integration_data:
+
+networks:
+  isolated_net:
+    driver: bridge
+    internal: true

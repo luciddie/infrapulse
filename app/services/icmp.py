@@ -4,14 +4,26 @@ import re
 import subprocess
 
 
-def ping_host(ip: str) -> dict:
+def ping_host(ip: str, source_ip: str | None = None) -> dict:
+    """Ping an IPv4 host via system `ping`.
+
+    On Linux (`iputils-ping`), `source_ip` binds the outgoing ICMP packet via
+    `-I <source_ip>`. On Windows, source-IP binding is not implemented and
+    traffic uses the OS routing table.
+    """
     ip = str(ipaddress.IPv4Address(ip))
     is_windows = platform.system() == "Windows"
+
+    if source_ip is not None:
+        source_ip = str(ipaddress.IPv4Address(source_ip))
 
     if is_windows:
         command = ["ping", "-n", "1", "-w", "1000", ip]
     else:
-        command = ["ping", "-c", "1", "-W", "1", ip]
+        command = ["ping", "-c", "1", "-W", "1"]
+        if source_ip is not None:
+            command.extend(["-I", source_ip])
+        command.append(ip)
 
     result_data = {
         "ip": ip,
