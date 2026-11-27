@@ -1,0 +1,47 @@
+groups:
+  - name: infrapulse_alerts
+    rules:
+      - alert: InfraPulseDown
+        expr: up{job="infrapulse"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "InfraPulse is unavailable"
+          description: "Prometheus cannot scrape InfraPulse."
+
+      - alert: DeviceIncidentDetected
+        expr: infrapulse_open_incidents{type="device"} > 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Device incident detected"
+          description: "InfraPulse has open device incidents."
+
+      - alert: ServiceIncidentDetected
+        expr: infrapulse_open_incidents{type="service"} > 0
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Service incident detected"
+          description: "InfraPulse has open service incidents."
+
+      - alert: HighCheckDuration
+        expr: histogram_quantile(0.95, sum by (le, protocol) (rate(infrapulse_check_duration_seconds_bucket[5m]))) > 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High monitoring check duration"
+          description: "P95 check duration exceeds 2 seconds."
+
+      - alert: MonitoringSchedulerStalled
+        expr: (increase(infrapulse_monitoring_cycles_total{status="success"}[5m]) == 0 or absent(infrapulse_monitoring_cycles_total{status="success"})) and on(job, instance) (up{job="infrapulse"} == 1)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Monitoring scheduler stalled"
+          description: "No successful monitoring cycles detected."

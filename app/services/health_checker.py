@@ -1,11 +1,18 @@
 import logging
 
+from time import perf_counter
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.models.device import Device
+
+from app.metrics import (
+    record_check,
+    record_incident
+)
+
 from app.services.icmp import ping_host
 from app.services.incident_manager import process_health_check
 from app.services.alert_manager import notify_incident
@@ -16,6 +23,8 @@ logger = logging.getLogger("infrapulse.health")
 
 
 def check_device(device_id: int) -> dict:
+
+    started = perf_counter()
 
     with SessionLocal() as db:
         device = db.get(Device, device_id)
@@ -38,6 +47,7 @@ def check_device(device_id: int) -> dict:
         }
 
     with SessionLocal.begin() as db:
+
         device = db.scalar(
             select(Device)
             .where(Device.id == device_id)
@@ -79,13 +89,26 @@ def check_device(device_id: int) -> dict:
             "incident_event": incident_event
         }
 
+    record_check(
+        protocol="icmp",
+        status=response["status"],
+        duration=perf_counter() - started
+    )
+
     if incident_event is not None:
+
+        record_incident(
+            incident_type="device",
+            event=incident_event
+        )
+
         try:
             notify_incident(
                 incident_event,
                 device_id,
                 ip_address
             )
+
         except Exception as exc:
             logger.warning(
                 "Notification failed: %s",

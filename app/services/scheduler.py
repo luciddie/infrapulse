@@ -1,5 +1,6 @@
 import logging
 
+from time import perf_counter
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock, Thread
 
@@ -9,6 +10,9 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models.device import Device
 from app.models.service import Service
+
+from app.metrics import record_monitoring_cycle
+
 from app.services.health_checker import check_device
 from app.services.service_checker import check_service
 
@@ -26,30 +30,34 @@ class MonitoringScheduler:
     def safe_check(self, device_id: int):
 
         if self.stop_event.is_set():
-            return
+            return None
 
         try:
             check_device(device_id)
+            return True
 
         except Exception:
             logger.exception(
                 "Device check failed: %s",
                 device_id
             )
+            return False
 
     def safe_service_check(self, service_id: int):
 
         if self.stop_event.is_set():
-            return
+            return None
 
         try:
             check_service(service_id)
+            return True
 
         except Exception:
             logger.exception(
                 "Service check failed: %s",
                 service_id
             )
+            return False
 
     def run_cycle(self):
 
@@ -98,21 +106,40 @@ class MonitoringScheduler:
                     )
                 )
 
-            for future in futures:
+            results = [
                 future.result()
+                for future in futures
+            ]
 
         logger.info("Monitoring cycle completed")
+
+        if self.stop_event.is_set():
+            return "cancelled"
+
+        if any(result is False for result in results):
+            return "partial_failure"
+
+        return "success"
 
     def _loop(self):
 
         while not self.stop_event.is_set():
 
+            started = perf_counter()
+            status = "failed"
+
             try:
-                self.run_cycle()
+                status = self.run_cycle()
 
             except Exception:
                 logger.exception(
                     "Monitoring cycle failed"
+                )
+
+            finally:
+                record_monitoring_cycle(
+                    status=status,
+                    duration=perf_counter() - started
                 )
 
             self.stop_event.wait(

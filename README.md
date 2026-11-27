@@ -284,7 +284,7 @@ Never commit the working `.env` file or real credentials.
 
 ## Testing
 
-InfraPulse currently includes 79 automated tests.
+InfraPulse currently includes 88 automated tests.
 
 The test suite covers:
 
@@ -395,3 +395,69 @@ Do not expose the API publicly without additional security controls.
 ## Project Status
 
 Under active development.
+
+## Observability with Prometheus
+
+InfraPulse exposes application and infrastructure metrics
+through a dedicated Prometheus endpoint.
+
+### Features
+
+- ICMP, TCP and HTTP monitoring counters
+- Monitoring check duration histograms
+- PostgreSQL-backed inventory metrics
+- Active device and service incident metrics
+- Monitoring scheduler metrics
+- Persistent Prometheus time-series storage
+- PromQL queries
+- Five alerting rules
+- Verified application failure and recovery lifecycle
+
+### Start Prometheus
+
+```bash
+docker compose up -d prometheus
+```
+
+Start the InfraPulse application separately:
+
+```bash
+python -m uvicorn app.main:app --reload
+```
+
+### Monitoring endpoints
+
+| Component | URL |
+|---|---|
+| InfraPulse Metrics | http://127.0.0.1:8000/metrics |
+| Prometheus | http://127.0.0.1:9090 |
+| Prometheus Targets | http://127.0.0.1:9090/targets |
+| Prometheus Alerts | http://127.0.0.1:9090/alerts |
+
+### Alerting rules
+
+- InfraPulseDown
+- DeviceIncidentDetected
+- ServiceIncidentDetected
+- HighCheckDuration
+- MonitoringSchedulerStalled
+
+### Prometheus configuration
+
+- Version: 3.16.0
+- Scrape interval: 15 seconds
+- Evaluation interval: 15 seconds
+- Storage retention: 15 days
+- TSDB retention size: 1 GB
+- Persistent Docker volume
+
+### Current limitations
+
+- Monitoring counters reset after application restart.
+- Metrics are designed for single-process deployment.
+- Database metrics are collected during each scrape.
+- Host connectivity configuration targets Docker Desktop.
+- Scheduler alerts assume monitoring is enabled.
+- Prometheus notification delivery requires Alertmanager.
+- Authentication is not implemented.
+- Monitoring thresholds require production tuning.
