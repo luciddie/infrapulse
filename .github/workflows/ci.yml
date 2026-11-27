@@ -11,9 +11,34 @@ permissions:
 
 jobs:
   test:
-    name: Python tests
-    runs-on: windows-latest
+    name: Python and PostgreSQL tests
+    runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+
+        env:
+          POSTGRES_DB: infrapulse_test
+          POSTGRES_USER: infrapulse
+          POSTGRES_PASSWORD: ci_test_password
+
+        ports:
+          - 5432:5432
+
+        options: >-
+          --health-cmd "pg_isready -U infrapulse -d infrapulse_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      POSTGRES_PASSWORD: ci_test_password
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_NAME: infrapulse_test
+      DB_USER: infrapulse
 
     steps:
       - name: Checkout repository
@@ -33,8 +58,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      - name: Check dependencies
+        run: python -m pip check
+
       - name: Check Python syntax
         run: python -m compileall -q app
+
+      - name: Check database connection
+        run: python -c "from app.database import check_database; assert check_database()"
+
+      - name: Apply database migrations
+        run: python -m alembic upgrade head
+
+      - name: Check database schema
+        run: python -m alembic check
 
       - name: Run automated tests
         run: python -m pytest -v
