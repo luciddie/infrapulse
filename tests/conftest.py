@@ -28,8 +28,10 @@ def clean_database():
             raise RuntimeError("Unsafe database connection")
 
         connection.execute(text(
-            "TRUNCATE TABLE scan_results, health_checks, "
-            "scans, devices RESTART IDENTITY"
+            "TRUNCATE TABLE service_incidents, "
+            "service_checks, services, incidents, "
+            "scan_results, health_checks, scans, "
+            "devices RESTART IDENTITY"
         ))
 
     yield

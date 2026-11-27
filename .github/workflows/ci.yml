@@ -39,6 +39,10 @@ jobs:
       DB_PORT: "5432"
       DB_NAME: infrapulse_test
       DB_USER: infrapulse
+      MONITORING_ENABLED: "false"
+      TELEGRAM_ENABLED: "false"
+      INCIDENT_FAILURE_THRESHOLD: "3"
+      SERVICE_INCIDENT_FAILURE_THRESHOLD: "3"
 
     steps:
       - name: Checkout repository

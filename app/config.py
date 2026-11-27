@@ -17,6 +17,15 @@ class Settings(BaseSettings):
     db_name: str = "infrapulse"
     db_user: str = "infrapulse"
 
+    monitoring_enabled: bool = False
+    monitoring_interval: int = 60
+    monitoring_workers: int = 4
+    incident_failure_threshold: int = 3
+    service_incident_failure_threshold: int = 3
+    telegram_enabled: bool = False
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str | None = None
+
     @property
     def database_url(self) -> URL:
         return URL.create(
