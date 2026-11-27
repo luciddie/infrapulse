@@ -8,7 +8,9 @@ engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
     pool_size=5,
-    max_overflow=5
+    max_overflow=5,
+    pool_timeout=3,
+    connect_args={"connect_timeout": 3},
 )
 
 
@@ -30,6 +32,8 @@ def get_db():
 
 def check_database() -> bool:
     with engine.connect() as connection:
-        result = connection.execute(text("SELECT 1"))
+        with connection.begin():
+            connection.execute(text("SET LOCAL statement_timeout = 3000"))
+            result = connection.execute(text("SELECT 1"))
 
-        return result.scalar_one() == 1
+            return result.scalar_one() == 1

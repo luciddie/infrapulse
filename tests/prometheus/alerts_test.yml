@@ -1,0 +1,108 @@
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 1. Monitoring disabled -> MonitoringSchedulerStalled must NOT fire
+  - interval: 1m
+    input_series:
+      - series: 'up{job="infrapulse",instance="app:8000"}'
+        values: '1+0x10'
+      - series: 'infrapulse_monitoring_enabled{job="infrapulse",instance="app:8000"}'
+        values: '0+0x10'
+      - series: 'infrapulse_monitoring_interval_seconds{job="infrapulse",instance="app:8000"}'
+        values: '60+0x10'
+      - series: 'infrapulse_monitoring_last_success_timestamp_seconds{job="infrapulse",instance="app:8000"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MonitoringSchedulerStalled
+        exp_alerts: []
+
+  # 2. Application unavailable -> MonitoringSchedulerStalled must NOT fire
+  - interval: 1m
+    input_series:
+      - series: 'up{job="infrapulse",instance="app:8000"}'
+        values: '0+0x10'
+      - series: 'infrapulse_monitoring_enabled{job="infrapulse",instance="app:8000"}'
+        values: '1+0x10'
+      - series: 'infrapulse_monitoring_interval_seconds{job="infrapulse",instance="app:8000"}'
+        values: '60+0x10'
+      - series: 'infrapulse_monitoring_last_success_timestamp_seconds{job="infrapulse",instance="app:8000"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MonitoringSchedulerStalled
+        exp_alerts: []
+
+  # 3. Scheduler startup (first success at 1m) & 4. Healthy monitoring
+  - interval: 1m
+    input_series:
+      - series: 'up{job="infrapulse",instance="app:8000"}'
+        values: '1+0x10'
+      - series: 'infrapulse_monitoring_enabled{job="infrapulse",instance="app:8000"}'
+        values: '1+0x10'
+      - series: 'infrapulse_monitoring_interval_seconds{job="infrapulse",instance="app:8000"}'
+        values: '60+0x10'
+      - series: 'infrapulse_monitoring_last_success_timestamp_seconds{job="infrapulse",instance="app:8000"}'
+        values: '0 60 120 180 240 300 360 420 480 540 600'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MonitoringSchedulerStalled
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: MonitoringSchedulerStalled
+        exp_alerts: []
+
+  # 5. Stalled monitoring & 6. Recovery (interval=60s -> threshold=180s, for=3m)
+  - interval: 1m
+    input_series:
+      - series: 'up{job="infrapulse",instance="app:8000"}'
+        values: '1+0x15'
+      - series: 'infrapulse_monitoring_enabled{job="infrapulse",instance="app:8000"}'
+        values: '1+0x15'
+      - series: 'infrapulse_monitoring_interval_seconds{job="infrapulse",instance="app:8000"}'
+        values: '60+0x15'
+      - series: 'infrapulse_monitoring_last_success_timestamp_seconds{job="infrapulse",instance="app:8000"}'
+        values: '60 60 60 60 60 60 60 60 60 540 600 660'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: MonitoringSchedulerStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: infrapulse
+              instance: app:8000
+            exp_annotations:
+              summary: "Monitoring scheduler stalled"
+              description: "No successful monitoring cycles detected while monitoring is enabled."
+      - eval_time: 10m
+        alertname: MonitoringSchedulerStalled
+        exp_alerts: []
+
+  # 7. Extended monitoring interval (300s -> threshold=660s): healthy at 5m/10m, fires at 16m if stalled
+  - interval: 1m
+    input_series:
+      - series: 'up{job="infrapulse",instance="app:8000"}'
+        values: '1+0x20'
+      - series: 'infrapulse_monitoring_enabled{job="infrapulse",instance="app:8000"}'
+        values: '1+0x20'
+      - series: 'infrapulse_monitoring_interval_seconds{job="infrapulse",instance="app:8000"}'
+        values: '300+0x20'
+      - series: 'infrapulse_monitoring_last_success_timestamp_seconds{job="infrapulse",instance="app:8000"}'
+        values: '60+0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MonitoringSchedulerStalled
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: MonitoringSchedulerStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: infrapulse
+              instance: app:8000
+            exp_annotations:
+              summary: "Monitoring scheduler stalled"
+              description: "No successful monitoring cycles detected while monitoring is enabled."

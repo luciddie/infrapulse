@@ -76,6 +76,28 @@ MONITORING_CYCLE_DURATION = Histogram(
     "infrapulse_monitoring_cycle_duration_seconds",
     "Duration of monitoring cycles in seconds"
 )
+
+
+MONITORING_ENABLED = Gauge(
+    "infrapulse_monitoring_enabled",
+    "Whether the monitoring scheduler is enabled (1=enabled, 0=disabled)"
+)
+
+
+MONITORING_INTERVAL_SECONDS = Gauge(
+    "infrapulse_monitoring_interval_seconds",
+    "Configured monitoring scheduler interval in seconds"
+)
+
+
+MONITORING_LAST_SUCCESS_TIMESTAMP = Gauge(
+    "infrapulse_monitoring_last_success_timestamp_seconds",
+    "Unix timestamp of the last successful monitoring cycle (0 if none yet)"
+)
+
+MONITORING_ENABLED.set(0)
+MONITORING_INTERVAL_SECONDS.set(60)
+MONITORING_LAST_SUCCESS_TIMESTAMP.set(0)
 def record_check(
     protocol: str,
     status: str,
@@ -112,3 +134,6 @@ def record_monitoring_cycle(
     MONITORING_CYCLE_DURATION.observe(
         duration
     )
+
+    if status == "success":
+        MONITORING_LAST_SUCCESS_TIMESTAMP.set_to_current_time()

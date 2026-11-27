@@ -1,0 +1,58 @@
+# Git & CI
+.git/
+.github/
+.gitignore
+
+# Secrets & environment files
+.env
+.env.*
+secrets/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*credentials*
+
+# Python virtual environments & caches
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Tests & coverage
+tests/
+.coverage
+htmlcov/
+.tox/
+
+# Logs
+*.log
+logs/
+
+# IDE & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Optional / local runtime data
+data/oui.csv
+
+# Documentation, Compose & monitoring configs
+docs/
+monitoring/
+compose*.yml
+README.md
+requirements-dev.txt
+Dockerfile
+.dockerignore

@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException
 
 from app.models.scan import ScanRequest
 from app.services.interfaces import get_interfaces
-from app.services.scanner import get_network_hosts
-from app.services.scan_manager import scan_manager
+from app.services.scanner import get_network_hosts, select_interface
+from app.services.scan_manager import ScanConflictError, scan_manager
 
 
 router = APIRouter(
@@ -14,7 +14,18 @@ router = APIRouter(
 
 @router.get("/interfaces")
 def interfaces():
-    return get_interfaces()
+    try:
+        return get_interfaces()
+    except NotImplementedError:
+        raise HTTPException(
+            status_code=501,
+            detail="Interface discovery is not supported on this platform"
+        )
+    except RuntimeError:
+        raise HTTPException(
+            status_code=503,
+            detail="Network interface discovery is unavailable"
+        )
 
 
 @router.post("/scan", status_code=202)
@@ -27,6 +38,9 @@ def start_scan(request: ScanRequest):
             raise ValueError(
                 "Large network scan requires explicit confirmation"
             )
+
+        if request.interface_ip is not None:
+            select_interface(request.network, request.interface_ip)
 
         scan_id = scan_manager.start_scan(
             cidr=request.network,
@@ -42,10 +56,22 @@ def start_scan(request: ScanRequest):
             detail=str(error)
         )
 
-    except RuntimeError as error:
+    except NotImplementedError:
+        raise HTTPException(
+            status_code=501,
+            detail="Interface discovery is not supported on this platform"
+        )
+
+    except ScanConflictError as error:
         raise HTTPException(
             status_code=409,
             detail=str(error)
+        )
+
+    except RuntimeError:
+        raise HTTPException(
+            status_code=503,
+            detail="Network interface discovery is unavailable"
         )
 
     return {

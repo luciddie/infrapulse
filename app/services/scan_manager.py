@@ -7,6 +7,10 @@ from app.services.scanner import scan_network
 from app.repositories import scans
 
 
+class ScanConflictError(RuntimeError):
+    pass
+
+
 class ScanManager:
 
     def __init__(self):
@@ -19,7 +23,7 @@ class ScanManager:
     def start_scan(self, **params) -> str:
         with self.lock:
             if self.active_scan_id is not None:
-                raise RuntimeError(
+                raise ScanConflictError(
                     "Another scan is already running"
                 )
 

@@ -38,10 +38,19 @@ groups:
           description: "P95 check duration exceeds 2 seconds."
 
       - alert: MonitoringSchedulerStalled
-        expr: (up{job="infrapulse"} == 1) unless on(job, instance) (increase(infrapulse_monitoring_cycles_total{job="infrapulse",status="success"}[5m]) > 0)
-        for: 2m
+        expr: |
+          up{job="infrapulse"} == 1
+          and on(job, instance) infrapulse_monitoring_enabled{job="infrapulse"} == 1
+          and on(job, instance) (
+            infrapulse_monitoring_last_success_timestamp_seconds{job="infrapulse"} == 0
+            or (
+              (time() - infrapulse_monitoring_last_success_timestamp_seconds{job="infrapulse"})
+              > on(job, instance) clamp_min(infrapulse_monitoring_interval_seconds{job="infrapulse"} * 2 + 60, 180)
+            )
+          )
+        for: 3m
         labels:
           severity: critical
         annotations:
           summary: "Monitoring scheduler stalled"
-          description: "No successful monitoring cycles detected."
+          description: "No successful monitoring cycles detected while monitoring is enabled."

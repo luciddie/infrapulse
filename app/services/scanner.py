@@ -28,13 +28,13 @@ def select_interface(
     interface_ip: str | None = None
 ) -> dict | None:
 
-    if platform.system() != "Windows":
-        return None
-
     network = ipaddress.IPv4Network(cidr, strict=False)
 
-    if network.is_loopback:
+    if network.is_loopback and not interface_ip:
         return None
+
+    if interface_ip:
+        interface_ip = str(ipaddress.IPv4Address(interface_ip))
 
     interfaces = get_interfaces()
 
@@ -87,14 +87,33 @@ def scan_network(
         )
 
     interface = select_interface(cidr, interface_ip)
+    explicit_source_ip = (
+        interface["ip"] if (interface_ip and interface) else None
+    )
 
     if interface:
         interface_ip = interface["ip"]
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        results = list(executor.map(ping_host, hosts))
+    interface_name = interface["name"] if interface else None
 
-    arp_table = get_arp_table(interface_ip)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        if explicit_source_ip is not None:
+            results = list(
+                executor.map(
+                    lambda host: ping_host(
+                        host,
+                        source_ip=explicit_source_ip,
+                    ),
+                    hosts,
+                )
+            )
+        else:
+            results = list(executor.map(ping_host, hosts))
+
+    if interface_name:
+        arp_table = get_arp_table(interface_ip, interface_name=interface_name)
+    else:
+        arp_table = get_arp_table(interface_ip)
 
     for device in results:
         ip = device["ip"]

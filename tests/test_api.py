@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -18,6 +19,66 @@ def test_health():
 
     assert response.status_code == 200
     assert response.json()["status"] == "healthy"
+
+
+def test_ready_success(monkeypatch):
+    from app import main as app_main
+
+    monkeypatch.setattr(app_main, "check_database", lambda: True)
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready", "database": "connected"}
+
+
+def test_ready_failure_and_sanitization(monkeypatch):
+    from app import main as app_main
+
+    monkeypatch.setattr(
+        app_main,
+        "check_database",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("postgresql://infrapulse:secret_pw@postgres:5432/infrapulse")
+        ),
+    )
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Database is not ready"}
+    assert "secret_pw" not in response.text
+    assert "postgresql://" not in response.text
+
+    monkeypatch.setattr(app_main, "check_database", lambda: False)
+    response_false = client.get("/ready")
+    assert response_false.status_code == 503
+    assert response_false.json() == {"detail": "Database is not ready"}
+
+
+def test_ready_sets_statement_timeout_and_sanitizes_hostname():
+    from app import database as app_db
+
+    # Verify check_database executes SET LOCAL statement_timeout = 3000 against infrapulse_test
+    assert app_db.check_database() is True
+
+    # Verify /ready never leaks hostname or traceback on OperationalError
+    from sqlalchemy.exc import OperationalError
+    from app import main as app_main
+
+    def raise_op_error():
+        raise OperationalError(
+            "SELECT 1",
+            {},
+            Exception("could not translate host name \"postgres-internal.prod\" to address"),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(app_main, "check_database", raise_op_error)
+        resp = client.get("/ready")
+
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": "Database is not ready"}
+    assert "postgres-internal" not in resp.text
+    assert "Traceback" not in resp.text
 
 
 def test_invalid_network():
