@@ -4,7 +4,7 @@ $runId = "$PID-$(Get-Random -Maximum 99999)"
 $net = "infrapulse-net-$runId"
 $target = "infrapulse-target-$runId"
 $probe = "infrapulse-probe-$runId"
-$image = "infrapulse:dev"
+$image = if ($env:INFRAPULSE_IMAGE) { $env:INFRAPULSE_IMAGE } else { "infrapulse:dev" }
 
 function Invoke-Checked {
     param([scriptblock]$Command, [string]$ErrorMessage)

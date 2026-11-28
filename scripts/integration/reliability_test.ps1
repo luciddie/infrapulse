@@ -1,9 +1,22 @@
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $composeFile = Join-Path $repoRoot 'compose.integration.yml'
 $proj = "infrapulse-rel-$PID-$(Get-Random -Maximum 99999)"
 $failOverride = Join-Path ([System.IO.Path]::GetTempPath()) "compose.fail_migrate.$PID.yml"
+$imageOverride = $null
+$composeFiles = @('-f', $composeFile)
+if ($env:INFRAPULSE_IMAGE) {
+    $imageOverride = Join-Path ([System.IO.Path]::GetTempPath()) "compose.rel_image_override.$PID.yml"
+    @"
+services:
+  migrate:
+    image: $($env:INFRAPULSE_IMAGE)
+  app:
+    image: $($env:INFRAPULSE_IMAGE)
+"@ | Set-Content -Path $imageOverride -Encoding UTF8
+    $composeFiles += @('-f', $imageOverride)
+}
 
 function Invoke-Checked {
     param([scriptblock]$Command, [string]$ErrorMessage)
@@ -25,10 +38,10 @@ try {
     $env:INTEGRATION_MONITORING_INTERVAL = '5'
 
     Write-Output "--- 1. Controlled migration failure & app blocked ($proj) ---"
-    Invoke-Checked { docker compose -p $proj -f $composeFile up -d postgres --wait } "Postgres failed to start"
+    Invoke-Checked { docker compose -p $proj @composeFiles up -d postgres --wait } "Postgres failed to start"
 
     $ErrorActionPreference = 'Continue'
-    docker compose -p $proj -f $composeFile -f $failOverride up -d app 2>&1 | Out-String | Write-Output
+    docker compose -p $proj @composeFiles -f $failOverride up -d app 2>&1 | Out-String | Write-Output
     $failRc = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($failRc -eq 0) {
@@ -41,12 +54,12 @@ try {
     Write-Output "MIGRATE_FAIL_RC=$failRc APP_STATE=[$appState]"
 
     Write-Output "--- 2. Successful migration recovery & app startup ---"
-    Invoke-Checked { docker compose -p $proj -f $composeFile up -d app } "Recovery startup failed"
+    Invoke-Checked { docker compose -p $proj @composeFiles up -d app } "Recovery startup failed"
     Start-Sleep -Seconds 4
-    Invoke-Checked { docker compose -p $proj -f $composeFile exec -T app python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5); assert r.status==200; print('RECOVERED /ready:', r.read().decode())" } "App not ready after recovery"
+    Invoke-Checked { docker compose -p $proj @composeFiles exec -T app python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5); assert r.status==200; print('RECOVERED /ready:', r.read().decode())" } "App not ready after recovery"
 
     Write-Output "--- 3. PostgreSQL shutdown -> /ready 503 & /health 200 ---"
-    Invoke-Checked { docker compose -p $proj -f $composeFile stop postgres } "Failed to stop postgres"
+    Invoke-Checked { docker compose -p $proj @composeFiles stop postgres } "Failed to stop postgres"
     $failoverScript = @"
 import urllib.request, urllib.error
 with urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5) as r:
@@ -59,20 +72,20 @@ except urllib.error.HTTPError as e:
     assert e.code == 503
     print('DB_DOWN /ready:', e.code, e.read().decode())
 "@
-    Invoke-Checked { docker compose -p $proj -f $composeFile exec -T app python -c $failoverScript } "Failover readiness check failed"
+    Invoke-Checked { docker compose -p $proj @composeFiles exec -T app python -c $failoverScript } "Failover readiness check failed"
 
     Write-Output "--- 4. PostgreSQL restart -> /ready 200 ---"
-    Invoke-Checked { docker compose -p $proj -f $composeFile start postgres } "Failed to restart postgres"
+    Invoke-Checked { docker compose -p $proj @composeFiles start postgres } "Failed to restart postgres"
     for ($i = 0; $i -lt 15; $i++) {
-        $pgHealth = (docker compose -p $proj -f $composeFile ps postgres --format "{{.Health}}").Trim()
+        $pgHealth = (docker compose -p $proj @composeFiles ps postgres --format "{{.Health}}").Trim()
         if ($pgHealth -eq 'healthy') { break }
         Start-Sleep -Seconds 2
     }
     if ($pgHealth -ne 'healthy') { throw "Postgres did not recover to healthy" }
-    Invoke-Checked { docker compose -p $proj -f $composeFile exec -T app python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5); assert r.status==200; print('DB_UP /ready:', r.read().decode())" } "App did not recover readiness"
+    Invoke-Checked { docker compose -p $proj @composeFiles exec -T app python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5); assert r.status==200; print('DB_UP /ready:', r.read().decode())" } "App did not recover readiness"
 
     Write-Output "--- 5. TCP & HTTP service monitoring + check persistence ---"
-    Invoke-Checked { docker compose -p $proj -f $composeFile exec -T postgres psql -U infrapulse -d infrapulse -c "INSERT INTO devices (ip_address, status) VALUES ('127.0.0.1', 'online') RETURNING id;" } "Failed to seed test device"
+    Invoke-Checked { docker compose -p $proj @composeFiles exec -T postgres psql -U infrapulse -d infrapulse -c "INSERT INTO devices (ip_address, status) VALUES ('127.0.0.1', 'online') RETURNING id;" } "Failed to seed test device"
     $svcScript = @"
 import json, urllib.request
 def post(path, payload=None):
@@ -96,17 +109,17 @@ for sid in (tcp_svc['id'], http_svc['id']):
         assert r.status == 200 and len(checks) == 1
         print(f'PERSISTED_CHECKS_{sid}:', r.status, len(checks))
 "@
-    Invoke-Checked { docker compose -p $proj -f $composeFile exec -T app python -c $svcScript } "Service monitoring/persistence verification failed"
+    Invoke-Checked { docker compose -p $proj @composeFiles exec -T app python -c $svcScript } "Service monitoring/persistence verification failed"
 
     Write-Output "--- 6. Resource stats & graceful shutdown with scheduler enabled ---"
     $env:INTEGRATION_MONITORING_ENABLED = 'true'
     $env:INTEGRATION_MONITORING_INTERVAL = '2'
-    Invoke-Checked { docker compose -p $proj -f $composeFile up -d app } "Failed to start app with scheduler enabled"
+    Invoke-Checked { docker compose -p $proj @composeFiles up -d app } "Failed to start app with scheduler enabled"
     Start-Sleep -Seconds 5
-    $appCid = (docker compose -p $proj -f $composeFile ps -q app).Trim()
+    $appCid = (docker compose -p $proj @composeFiles ps -q app).Trim()
     docker stats --no-stream --format "STATS: {{.Name}} CPU={{.CPUPerc}} MEM={{.MemUsage}}" $appCid
-    Invoke-Checked { docker compose -p $proj -f $composeFile stop app } "Failed to stop app gracefully"
-    $logs = docker compose -p $proj -f $composeFile logs --tail=20 app | Out-String
+    Invoke-Checked { docker compose -p $proj @composeFiles stop app } "Failed to stop app gracefully"
+    $logs = docker compose -p $proj @composeFiles logs --tail=20 app | Out-String
     $logs | Write-Output
     if ($logs -notmatch 'Application shutdown complete') {
         throw "Graceful shutdown log message missing"
@@ -117,7 +130,8 @@ finally {
     Remove-Item Env:INTEGRATION_MONITORING_INTERVAL -ErrorAction SilentlyContinue
     Remove-Item -Force $failOverride -ErrorAction SilentlyContinue
     Write-Output "--- 7. Cleanup ($proj) ---"
-    docker compose -p $proj -f $composeFile down -v --remove-orphans
+    docker compose -p $proj @composeFiles down -v --remove-orphans
+    if ($imageOverride) { Remove-Item -Force $imageOverride -ErrorAction SilentlyContinue }
     $remC = (docker ps -a --filter "label=com.docker.compose.project=$proj" --format "{{.Names}}") -join ","
     $remV = (docker volume ls --filter "label=com.docker.compose.project=$proj" --format "{{.Name}}") -join ","
     $remN = (docker network ls --filter "label=com.docker.compose.project=$proj" --format "{{.Name}}") -join ","

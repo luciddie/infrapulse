@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.14-slim@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b AS builder
+FROM python:3.14-slim@sha256:080b4f1282edb604b21e61dfca35d1d215ed6cd1c17de27ccfc34e6fadc4ee49 AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -12,10 +12,12 @@ RUN python -m venv /opt/venv
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -m pip check \
+    && rm -rf /opt/venv/lib/python*/site-packages/pip* /opt/venv/bin/pip*
 
 
-FROM python:3.14-slim@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b AS runtime
+FROM python:3.14-slim@sha256:080b4f1282edb604b21e61dfca35d1d215ed6cd1c17de27ccfc34e6fadc4ee49 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -26,7 +28,10 @@ RUN apt-get update \
         iputils-ping \
         iproute2 \
         ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends --only-upgrade \
+        libzstd1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/local/lib/python*/site-packages/pip* /usr/local/bin/pip*
 
 RUN groupadd --gid 10001 --system infrapulse \
     && useradd --uid 10001 --gid 10001 --system --no-create-home --shell /usr/sbin/nologin infrapulse

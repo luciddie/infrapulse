@@ -1,4 +1,4 @@
-name: InfraPulse CI
+name: InfraPulse CI/CD
 
 on:
   push:
@@ -9,6 +9,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: luciddie/infrapulse
+  LOCAL_IMAGE_TAG: infrapulse:dev
+
 jobs:
   test:
     name: Python and PostgreSQL tests
@@ -18,15 +27,12 @@ jobs:
     services:
       postgres:
         image: postgres:17-alpine
-
         env:
           POSTGRES_DB: infrapulse_test
           POSTGRES_USER: infrapulse
           POSTGRES_PASSWORD: ci_test_password
-
         ports:
           - 5432:5432
-
         options: >-
           --health-cmd "pg_isready -U infrapulse -d infrapulse_test"
           --health-interval 10s
@@ -46,10 +52,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.14"
           cache: pip
@@ -79,3 +87,463 @@ jobs:
 
       - name: Run automated tests
         run: python -m pytest -v
+
+  prometheus-test:
+    name: Prometheus config and rule tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Validate Prometheus config, rules, and rule tests
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "${GITHUB_WORKSPACE}/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "${GITHUB_WORKSPACE}/monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            prom/prometheus:v3.16.0 \
+            check config /etc/prometheus/prometheus.yml
+
+          docker run --rm --entrypoint promtool \
+            -v "${GITHUB_WORKSPACE}/monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            prom/prometheus:v3.16.0 \
+            check rules /etc/prometheus/alerts.yml
+
+          docker run --rm --entrypoint promtool \
+            -v "${GITHUB_WORKSPACE}/monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            -v "${GITHUB_WORKSPACE}/tests/prometheus/alerts_test.yml:/etc/prometheus/alerts_test.yml:ro" \
+            prom/prometheus:v3.16.0 \
+            test rules /etc/prometheus/alerts_test.yml
+
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      image_id: ${{ steps.record.outputs.image_id }}
+      archive_sha256: ${{ steps.record.outputs.archive_sha256 }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Extract Docker OCI metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          labels: |
+            org.opencontainers.image.title=InfraPulse
+            org.opencontainers.image.description=Open-source infrastructure discovery, monitoring and incident management platform
+            org.opencontainers.image.source=https://github.com/luciddie/infrapulse
+
+      - name: Build Docker image and export archive
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: ${{ env.LOCAL_IMAGE_TAG }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/infrapulse-image.tar
+
+      - name: Record image identity and archive checksum
+        id: record
+        run: |
+          docker load -i /tmp/infrapulse-image.tar
+          IMAGE_ID=$(docker inspect --format='{{.Id}}' "${LOCAL_IMAGE_TAG}")
+          IMAGE_ARCH=$(docker inspect --format='{{.Os}}/{{.Architecture}}' "${LOCAL_IMAGE_TAG}")
+          test "${IMAGE_ARCH}" = "linux/amd64"
+
+          (cd /tmp && sha256sum infrapulse-image.tar > infrapulse-image.sha256)
+          ARCHIVE_SHA256=$(awk '{print $1}' /tmp/infrapulse-image.sha256)
+
+          cat <<EOF > /tmp/infrapulse-image-metadata.json
+          {
+            "image_tag": "${LOCAL_IMAGE_TAG}",
+            "image_id": "${IMAGE_ID}",
+            "archive_sha256": "${ARCHIVE_SHA256}",
+            "source_commit_sha": "${GITHUB_SHA}",
+            "architecture": "${IMAGE_ARCH}"
+          }
+          EOF
+
+          cat /tmp/infrapulse-image-metadata.json
+          echo "image_id=${IMAGE_ID}" >> "${GITHUB_OUTPUT}"
+          echo "archive_sha256=${ARCHIVE_SHA256}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload tested image archive and checksum
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: infrapulse-image
+          path: |
+            /tmp/infrapulse-image.tar
+            /tmp/infrapulse-image.sha256
+            /tmp/infrapulse-image-metadata.json
+          retention-days: 7
+          if-no-files-found: error
+
+  container-test:
+    name: Container smoke and integration tests
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Download built image artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: infrapulse-image
+          path: /tmp
+
+      - name: Verify archive checksum and load image
+        env:
+          EXPECTED_IMAGE_ID: ${{ needs.build.outputs.image_id }}
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.build.outputs.archive_sha256 }}
+        run: |
+          (cd /tmp && sha256sum -c infrapulse-image.sha256)
+          ACTUAL_ARCHIVE_SHA256=$(sha256sum /tmp/infrapulse-image.tar | awk '{print $1}')
+          test "${ACTUAL_ARCHIVE_SHA256}" = "${EXPECTED_ARCHIVE_SHA256}"
+          docker load -i /tmp/infrapulse-image.tar
+          LOADED_ID=$(docker inspect --format='{{.Id}}' "${LOCAL_IMAGE_TAG}")
+          echo "Loaded Image ID: ${LOADED_ID}"
+          test "${LOADED_ID}" = "${EXPECTED_IMAGE_ID}"
+
+      - name: Run isolated container smoke tests
+        run: |
+          SMOKE_CONTAINER="infrapulse-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm -f "${SMOKE_CONTAINER}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          UID_GID=$(docker run --rm --network none --entrypoint id "${LOCAL_IMAGE_TAG}" -u):$(docker run --rm --network none --entrypoint id "${LOCAL_IMAGE_TAG}" -g)
+          echo "Runtime UID:GID=${UID_GID}"
+          test "${UID_GID}" = "10001:10001"
+
+          docker run --rm --network none --entrypoint sh "${LOCAL_IMAGE_TAG}" -c '
+            set -e
+            python --version
+            python -m alembic --version
+            ip -V
+            ping -c 1 -W 2 127.0.0.1
+            test ! -e /app/.env
+            test ! -e /app/secrets
+            test ! -e /app/.git
+            test ! -e /app/.venv
+          '
+
+          docker run --rm --network none \
+            -e POSTGRES_PASSWORD=ci_smoke_test_password \
+            -e MONITORING_ENABLED=false \
+            -e TELEGRAM_ENABLED=false \
+            --entrypoint python "${LOCAL_IMAGE_TAG}" \
+            -c "import fastapi, uvicorn, sqlalchemy, alembic, pydantic_settings, psycopg, httpx, prometheus_client, app.main; print('Runtime deps & FastAPI app import OK')"
+
+          docker run -d --name "${SMOKE_CONTAINER}" --network none \
+            -e POSTGRES_PASSWORD=ci_smoke_test_password \
+            -e MONITORING_ENABLED=false \
+            -e TELEGRAM_ENABLED=false \
+            "${LOCAL_IMAGE_TAG}"
+
+          HEALTH_STATUS=""
+          for _ in $(seq 1 20); do
+            HEALTH_STATUS=$(docker inspect --format='{{.State.Health.Status}}' "${SMOKE_CONTAINER}")
+            if [ "${HEALTH_STATUS}" = "healthy" ]; then
+              break
+            fi
+            sleep 3
+          done
+          echo "Docker HEALTHCHECK status: ${HEALTH_STATUS}"
+          test "${HEALTH_STATUS}" = "healthy"
+
+          docker exec "${SMOKE_CONTAINER}" python -c \
+            "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3); assert r.status == 200; print('Liveness:', r.read().decode())"
+
+      - name: Run isolated Docker network test
+        shell: pwsh
+        run: ./scripts/integration/docker_net_test.ps1
+
+      - name: Run Compose E2E integration test
+        shell: pwsh
+        run: ./scripts/integration/compose_e2e.ps1
+
+      - name: Run Compose reliability test
+        shell: pwsh
+        run: ./scripts/integration/reliability_test.ps1
+
+  trivy-scan:
+    name: Trivy container security scan
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 10
+
+    steps:
+      - name: Download built image artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: infrapulse-image
+          path: /tmp
+
+      - name: Verify archive checksum
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.build.outputs.archive_sha256 }}
+        run: |
+          (cd /tmp && sha256sum -c infrapulse-image.sha256)
+          ACTUAL_ARCHIVE_SHA256=$(sha256sum /tmp/infrapulse-image.tar | awk '{print $1}')
+          test "${ACTUAL_ARCHIVE_SHA256}" = "${EXPECTED_ARCHIVE_SHA256}"
+
+      - name: Generate full Trivy vulnerability report (all severities, including unfixed)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
+        with:
+          version: "v0.76.2"
+          scan-type: image
+          input: /tmp/infrapulse-image.tar
+          format: json
+          output: /tmp/trivy-full-report.json
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          ignore-unfixed: false
+          exit-code: "0"
+
+      - name: Print Trivy full vulnerability summary
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
+        with:
+          version: "v0.76.2"
+          scan-type: image
+          input: /tmp/infrapulse-image.tar
+          format: table
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          ignore-unfixed: false
+          exit-code: "0"
+
+      - name: Generate Trivy SARIF report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
+        with:
+          version: "v0.76.2"
+          scan-type: image
+          input: /tmp/infrapulse-image.tar
+          format: sarif
+          output: /tmp/trivy-results.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          ignore-unfixed: false
+          exit-code: "0"
+
+      - name: Upload Trivy reports as workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-reports
+          path: |
+            /tmp/trivy-full-report.json
+            /tmp/trivy-results.sarif
+          retention-days: 7
+
+      - name: Enforce blocking security gate (fixable CRITICAL and HIGH)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
+        with:
+          version: "v0.76.2"
+          scan-type: image
+          input: /tmp/infrapulse-image.tar
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  sarif-upload:
+    name: Upload Trivy SARIF to GitHub Security (optional)
+    runs-on: ubuntu-latest
+    needs: trivy-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Download Trivy SARIF report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trivy-reports
+          path: /tmp
+
+      - name: Upload SARIF to GitHub Security
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          sarif_file: /tmp/trivy-results.sarif
+
+  sbom:
+    name: Generate SPDX SBOM
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 10
+
+    steps:
+      - name: Download built image artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: infrapulse-image
+          path: /tmp
+
+      - name: Verify archive checksum
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.build.outputs.archive_sha256 }}
+        run: |
+          (cd /tmp && sha256sum -c infrapulse-image.sha256)
+          ACTUAL_ARCHIVE_SHA256=$(sha256sum /tmp/infrapulse-image.tar | awk '{print $1}')
+          test "${ACTUAL_ARCHIVE_SHA256}" = "${EXPECTED_ARCHIVE_SHA256}"
+
+      - name: Generate SPDX JSON SBOM from image archive
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
+        with:
+          image: docker-archive:/tmp/infrapulse-image.tar
+          format: spdx-json
+          output-file: /tmp/infrapulse.spdx.json
+          syft-version: "v1.57.2"
+          upload-artifact: "false"
+
+      - name: Validate SPDX SBOM is valid and non-empty
+        run: |
+          python3 -c '
+          import json
+          with open("/tmp/infrapulse.spdx.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+          spdx_version = data.get("spdxVersion", "")
+          assert spdx_version.startswith("SPDX-"), "Missing spdxVersion"
+          pkgs = data.get("packages", [])
+          assert len(pkgs) > 0, "SBOM contains zero packages"
+          print(f"Valid SPDX SBOM ({spdx_version}): {len(pkgs)} packages")
+          '
+
+      - name: Upload SPDX SBOM artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: infrapulse-sbom
+          path: /tmp/infrapulse.spdx.json
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Publish to GHCR and attest
+    runs-on: ubuntu-latest
+    needs: [test, prometheus-test, build, container-test, trivy-scan, sbom]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+    concurrency:
+      group: ghcr-publish-main
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download tested image artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: infrapulse-image
+          path: /tmp
+
+      - name: Download validated SPDX SBOM artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: infrapulse-sbom
+          path: /tmp
+
+      - name: Verify archive checksum and image identity
+        env:
+          EXPECTED_IMAGE_ID: ${{ needs.build.outputs.image_id }}
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.build.outputs.archive_sha256 }}
+        run: |
+          (cd /tmp && sha256sum -c infrapulse-image.sha256)
+          ACTUAL_ARCHIVE_SHA256=$(sha256sum /tmp/infrapulse-image.tar | awk '{print $1}')
+          test "${ACTUAL_ARCHIVE_SHA256}" = "${EXPECTED_ARCHIVE_SHA256}"
+          docker load -i /tmp/infrapulse-image.tar
+          LOADED_ID=$(docker inspect --format='{{.Id}}' "${LOCAL_IMAGE_TAG}")
+          echo "Verified Image ID: ${LOADED_ID}"
+          test "${LOADED_ID}" = "${EXPECTED_IMAGE_ID}"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish immutable commit-SHA tag (fail-closed on conflict)
+        id: push
+        env:
+          EXPECTED_IMAGE_ID: ${{ needs.build.outputs.image_id }}
+        run: |
+          IMAGE="${REGISTRY}/${IMAGE_NAME}"
+          SHA_TAG="${IMAGE}:sha-${GITHUB_SHA}"
+
+          if INSPECT_ERR=$(docker buildx imagetools inspect "${SHA_TAG}" 2>&1); then
+            echo "Tag ${SHA_TAG} already exists; verifying image identity..."
+            docker pull "${SHA_TAG}"
+            REMOTE_ID=$(docker inspect --format='{{.Id}}' "${SHA_TAG}")
+            if [ "${REMOTE_ID}" != "${EXPECTED_IMAGE_ID}" ]; then
+              echo "::error::Existing tag ${SHA_TAG} has Image ID ${REMOTE_ID}, expected ${EXPECTED_IMAGE_ID}. Refusing to overwrite."
+              exit 1
+            fi
+            DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "${SHA_TAG}" | cut -d'@' -f2)
+          elif echo "${INSPECT_ERR}" | grep -qiE "not found|manifest unknown|name unknown|404"; then
+            docker tag "${LOCAL_IMAGE_TAG}" "${SHA_TAG}"
+            docker push "${SHA_TAG}"
+            DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "${SHA_TAG}" | cut -d'@' -f2)
+          else
+            echo "::error::Failed to inspect existing tag ${SHA_TAG}: ${INSPECT_ERR}"
+            exit 1
+          fi
+
+          echo "${DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          echo "Registry manifest digest: ${DIGEST}"
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest build provenance for published digest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest SPDX SBOM for published digest
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: /tmp/infrapulse.spdx.json
+          push-to-registry: true
+
+      - name: Promote verified manifest digest to latest (only if still main HEAD)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          IMAGE="${REGISTRY}/${IMAGE_NAME}"
+          MAIN_HEAD=$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main | awk '{print $1}')
+          if [ "${GITHUB_SHA}" != "${MAIN_HEAD}" ]; then
+            echo "Skipping :latest update; ${GITHUB_SHA} is no longer main HEAD (${MAIN_HEAD})."
+            exit 0
+          fi
+
+          docker buildx imagetools create --prefer-index=false -t "${IMAGE}:latest" "${IMAGE}@${DIGEST}"
+          LATEST_DIGEST=$(docker buildx imagetools inspect "${IMAGE}:latest" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "${LATEST_DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          echo "latest digest: ${LATEST_DIGEST} (expected: ${DIGEST})"
+          test "${LATEST_DIGEST}" = "${DIGEST}"
