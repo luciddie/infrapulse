@@ -1,0 +1,184 @@
+name: InfraPulse Staging Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "Immutable GHCR image digest (sha256:<64-hex-chars>) from main CI"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  attestations: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_REPO: luciddie/infrapulse
+  SIGNER_WORKFLOW: luciddie/infrapulse/.github/workflows/ci.yml
+  SOURCE_REF: refs/heads/main
+
+jobs:
+  deploy-staging:
+    name: Verify artifact and deploy to staging
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    # The 'staging' GitHub Environment must also restrict deployment branches to 'main' only.
+    environment: staging
+    timeout-minutes: 15
+
+    steps:
+      - name: Enforce main-branch execution ref
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Deployment is permitted only from refs/heads/main (got ${GITHUB_REF})."
+            exit 1
+          fi
+
+      - name: Validate digest format and construct immutable image reference
+        id: validate
+        env:
+          INPUT_DIGEST: ${{ inputs.image_digest }}
+          TARGET_REGISTRY: ${{ env.REGISTRY }}
+          TARGET_REPO: ${{ env.IMAGE_REPO }}
+        run: |
+          DIGEST=$(printf '%s' "${INPUT_DIGEST}" | tr -d '[:space:]')
+          if ! printf '%s' "${DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::Invalid image_digest '${DIGEST}'. Expected ^sha256:[0-9a-f]{64}$."
+            exit 1
+          fi
+          IMAGE_REF="${TARGET_REGISTRY}/${TARGET_REPO}@${DIGEST}"
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "image_ref=${IMAGE_REF}" >> "${GITHUB_OUTPUT}"
+          echo "Validated immutable reference: ${IMAGE_REF}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Verify single-platform linux/amd64 image manifest and config
+        env:
+          IMAGE_REF: ${{ steps.validate.outputs.image_ref }}
+        run: |
+          CONFIG_JSON=$(docker buildx imagetools inspect "${IMAGE_REF}" --format '{{json .Image}}')
+          OS_ARCH=$(printf '%s' "${CONFIG_JSON}" | python3 -c '
+          import json, sys
+          cfg = json.load(sys.stdin)
+          os_name = cfg.get("os", "")
+          arch = cfg.get("architecture", "")
+          print(f"{os_name}/{arch}")
+          ')
+          echo "Inspected image platform: ${OS_ARCH}"
+          if [ "${OS_ARCH}" != "linux/amd64" ]; then
+            echo "::error::Expected linux/amd64 image, got '${OS_ARCH}'."
+            exit 1
+          fi
+
+      - name: Verify SLSA Build Provenance attestation
+        id: provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REF: ${{ steps.validate.outputs.image_ref }}
+        run: |
+          PROV_JSON=$(gh attestation verify "oci://${IMAGE_REF}" \
+            --repo "${IMAGE_REPO}" \
+            --signer-workflow "${SIGNER_WORKFLOW}" \
+            --source-ref "${SOURCE_REF}" \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --format json)
+
+          SOURCE_COMMIT=$(printf '%s' "${PROV_JSON}" | python3 -c '
+          import json, sys
+          items = json.load(sys.stdin)
+          commit = ""
+          if isinstance(items, list) and items:
+              stmt = items[0].get("verificationResult", {}).get("statement", {})
+              deps = stmt.get("predicate", {}).get("buildDefinition", {}).get("resolvedDependencies", [])
+              for dep in deps:
+                  dig = dep.get("digest", {})
+                  if "gitCommit" in dig:
+                      commit = dig["gitCommit"]
+                      break
+          print(commit)
+          ')
+          if ! printf '%s' "${SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Failed to extract valid 40-char gitCommit from provenance (got '${SOURCE_COMMIT}')."
+            exit 1
+          fi
+          echo "Verified provenance (source commit: ${SOURCE_COMMIT})"
+          echo "source_commit=${SOURCE_COMMIT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify SPDX SBOM attestation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REF: ${{ steps.validate.outputs.image_ref }}
+        run: |
+          gh attestation verify "oci://${IMAGE_REF}" \
+            --repo "${IMAGE_REPO}" \
+            --signer-workflow "${SIGNER_WORKFLOW}" \
+            --source-ref "${SOURCE_REF}" \
+            --predicate-type "https://spdx.dev/Document" \
+            --format json >/dev/null
+          echo "Verified SPDX SBOM attestation."
+
+      - name: Deploy verified digest to staging host over SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST_KNOWN_HOSTS: ${{ secrets.DEPLOY_HOST_KNOWN_HOSTS }}
+          IMAGE_DIGEST: ${{ steps.validate.outputs.digest }}
+          SOURCE_COMMIT: ${{ steps.provenance.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          for var in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_HOST_KNOWN_HOSTS; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing required GitHub Environment secret: ${var}"
+              exit 1
+            fi
+          done
+
+          PORT="${DEPLOY_PORT:-22}"
+          if ! printf '%s' "${PORT}" | grep -Eq '^[0-9]+$' || (( PORT < 1 || PORT > 65535 )); then
+            echo "::error::Invalid DEPLOY_PORT '${PORT}'. Must be 1..65535."
+            exit 1
+          fi
+          if ! printf '%s' "${IMAGE_DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::Invalid IMAGE_DIGEST."
+            exit 1
+          fi
+          if ! printf '%s' "${SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Invalid SOURCE_COMMIT."
+            exit 1
+          fi
+
+          SSH_DIR=$(mktemp -d "${RUNNER_TEMP}/ssh.XXXXXX")
+          cleanup() {
+            rm -rf "${SSH_DIR}"
+          }
+          trap cleanup EXIT
+
+          chmod 700 "${SSH_DIR}"
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > "${SSH_DIR}/id_deploy"
+          chmod 600 "${SSH_DIR}/id_deploy"
+          printf '%s\n' "${DEPLOY_HOST_KNOWN_HOSTS}" > "${SSH_DIR}/known_hosts"
+          chmod 644 "${SSH_DIR}/known_hosts"
+
+          ssh \
+            -i "${SSH_DIR}/id_deploy" \
+            -p "${PORT}" \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${SSH_DIR}/known_hosts" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=3 \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "bash" "/opt/infrapulse/scripts/deploy/deploy.sh" \
+            --digest "${IMAGE_DIGEST}" \
+            --commit "${SOURCE_COMMIT}"

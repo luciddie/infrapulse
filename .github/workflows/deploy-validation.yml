@@ -1,0 +1,87 @@
+name: InfraPulse Deployment Validation
+
+on:
+  push:
+    branches:
+      - main
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-validation:
+    name: Actionlint, ShellCheck, and Bash syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Validate workflows with actionlint
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}:/repo:ro" -w /repo \
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            -no-color .github/workflows/deploy.yml .github/workflows/deploy-validation.yml .github/workflows/ci.yml
+
+      - name: Validate deployment scripts with ShellCheck
+        run: |
+          docker run --rm -v "${GITHUB_WORKSPACE}:/repo:ro" -w /repo \
+            koalaman/shellcheck@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb \
+            -x scripts/deploy/lib.sh scripts/deploy/deploy.sh scripts/deploy/rollback.sh \
+            scripts/deploy/tests/unit_test.sh scripts/deploy/tests/integration_test.sh
+
+      - name: Validate Bash syntax
+        run: |
+          for f in \
+            scripts/deploy/lib.sh \
+            scripts/deploy/deploy.sh \
+            scripts/deploy/rollback.sh \
+            scripts/deploy/tests/unit_test.sh \
+            scripts/deploy/tests/integration_test.sh; do
+            bash -n "$f"
+          done
+
+  deploy-unit-tests:
+    name: Deployment script unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Run mocked deployment unit tests
+        run: bash scripts/deploy/tests/unit_test.sh
+
+  deploy-integration-tests:
+    name: Isolated GHCR deployment and pg_restore tests
+    runs-on: ubuntu-latest
+    needs: [static-validation, deploy-unit-tests]
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Run isolated real GHCR deployment and pg_restore integration test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/deploy/tests/integration_test.sh
