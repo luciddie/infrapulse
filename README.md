@@ -335,20 +335,49 @@ Never run tests against a production database.
 
 Network responses and Telegram delivery are mocked where needed.
 
-## Continuous Integration
+## Continuous Integration & Docker CI/CD (GHCR)
 
-GitHub Actions is configured to validate the project on Linux.
+GitHub Actions ([ci.yml](.github/workflows/ci.yml)) validates every pull request and branch push on `ubuntu-latest`, and publishes verified container images to GitHub Container Registry (`ghcr.io/luciddie/infrapulse`) on successful pushes to `main`.
 
-The CI pipeline includes:
+### Workflow Architecture & Job Responsibilities
 
-1. Dependency installation
-2. Dependency validation
-3. Python syntax validation
-4. PostgreSQL startup
-5. Database connection verification
-6. Alembic migrations
-7. Database schema validation
-8. Automated tests
+1. **`test`**: Starts `postgres:17-alpine`, validates dependencies (`pip check`), syntax (`compileall`), database connectivity, `alembic upgrade head`, `alembic check`, and runs the `pytest` suite against `infrapulse_test`.
+2. **`prometheus-test`**: Runs `promtool check config`, `promtool check rules`, and `promtool test rules` (7 alert-rule scenarios) using `prom/prometheus:v3.16.0`.
+3. **`build`**: Uses Docker Buildx (`linux/amd64`) with GitHub Actions layer caching (`type=gha`) and OCI labels to build `infrapulse:dev` **once** per workflow run, exports `/tmp/infrapulse-image.tar`, records its `Image ID`, archive `sha256` checksum, commit SHA, and architecture, and uploads the archive and checksum as workflow artifacts.
+4. **`container-test`** (`needs: build`): Verifies the archive `sha256` checksum and `Image ID`, runs isolated (`--network none`) container smoke tests (UID/GID `10001`, Python version, `pip check`, FastAPI import with dummy env vars, Alembic, `iproute2`, non-root localhost ICMP, `HEALTHCHECK`, and absence of `.env`/`secrets/`/`.git/`/`.venv/`), and executes all three PowerShell (`pwsh`) integration scripts (`docker_net_test.ps1`, `compose_e2e.ps1`, `reliability_test.ps1`) against the loaded `infrapulse:dev` image.
+5. **`trivy-scan`** (`needs: build`): Verifies the archive `sha256` checksum and scans the exact image archive for OS and Python vulnerabilities:
+   - **Full report** (`CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN`, including unfixed CVEs): Uploaded as a machine-readable JSON/SARIF artifact (`trivy-reports`).
+   - **Blocking gate**: Fails CI on **fixable** `CRITICAL` and `HIGH` vulnerabilities (`ignore-unfixed: true`, `exit-code: "1"`). Unfixed CVEs (such as Debian base-image `HIGH` findings without upstream fixes) remain visible in the full report without blocking builds under the initial policy.
+   - **Runtime image hardening**: [Dockerfile](Dockerfile) runs `pip check` in the `builder` stage and removes `pip` (and its vendored tools/metadata) from both `/opt/venv` and `/usr/local` in `runtime`, while applying a targeted `--only-upgrade libzstd1` security update.
+6. **`sbom`** (`needs: build`): Verifies the archive `sha256` checksum, generates a validated, non-empty SPDX JSON SBOM (`infrapulse.spdx.json`) from the tested image archive using `anchore/sbom-action`, and uploads it as a workflow artifact.
+7. **`sarif-upload`** (`needs: trivy-scan`, `main` push only, optional): Uploads Trivy SARIF results to GitHub Security using `security-events: write` (`continue-on-error: true` so untrusted PRs never receive `security-events: write`).
+8. **`publish`** (`needs: [test, prometheus-test, build, container-test, trivy-scan, sbom]`, `main` push only): Verifies archive checksum and `Image ID`, authenticates to `ghcr.io` with `GITHUB_TOKEN`, pushes the immutable `sha-<full-commit-sha>` tag (failing closed if a conflicting tag already exists), generates GitHub Artifact Attestations for **workflow provenance** and the **SPDX SBOM** bound to the published registry manifest digest, and finally promotes the verified manifest digest to `:latest` only if `GITHUB_SHA` is still `main` HEAD.
+
+> **Note:** Until the first merge to `main` completes, no container images are published to `ghcr.io/luciddie/infrapulse`, and GitHub-hosted runner behavior (GHA cache, `attest-build-provenance`, `attest-sbom`, and GHCR push) remains to be verified on the first GitHub Actions run.
+
+### Permissions, Visibility & Concurrency
+
+- **Least-privilege `GITHUB_TOKEN`**: Global default is `contents: read`. Only `publish` receives `packages: write`, `id-token: write`, and `attestations: write`. All third-party actions are pinned to full 40-character commit SHAs.
+- **Package visibility**: After the first `main` publish, set the package visibility of `ghcr.io/luciddie/infrapulse` to **Public** in GitHub Package Settings so unauthenticated `docker pull` works.
+- **Concurrency & reruns**: Feature branch and PR runs cancel superseded in-progress runs; `main` runs do not cancel in-progress runs (`cancel-in-progress: false`), and `publish` uses serialized concurrency (`ghcr-publish-main`). Note that GitHub Actions still queues at most one pending run per concurrency group, so rapid consecutive pushes to `main` may coalesce intermediate commits. On workflow reruns for the same commit, `publish` checks whether `sha-<full-commit-sha>` already exists in GHCR, verifies its `Image ID` matches the tested build, and fails closed on any mismatch or unexpected registry error rather than overwriting.
+- **Publication & attestation limitations**: If `actions/attest-build-provenance` or `actions/attest-sbom` fails after `sha-<full-commit-sha>` is pushed, the workflow fails and `:latest` is not updated, though the `sha-<full-commit-sha>` image will already exist in GHCR.
+
+### Image Tags, Digests, Verification & Rollback
+
+- **Tags**: `sha-<full-commit-sha>` is immutable per commit; `:latest` is a **mutable pointer** and should not be used for deterministic production deployments.
+- **Digest-based deployment**: Pull and deploy by immutable registry manifest digest:
+  ```bash
+  docker pull ghcr.io/luciddie/infrapulse@sha256:<MANIFEST_DIGEST>
+  ```
+- **Attestation verification**: GitHub Artifact Attestations prove that the published digest was built/published by this repository's GitHub Actions workflow (`publish` job provenance, distinct from native BuildKit SLSA provenance) and bind the SPDX SBOM to that digest. Verify locally with GitHub CLI:
+  ```bash
+  gh attestation verify oci://ghcr.io/luciddie/infrapulse@sha256:<MANIFEST_DIGEST> --owner luciddie
+  ```
+- **Rollback**: Re-deploy a previously validated immutable `sha-<commit>` tag or `@sha256:<MANIFEST_DIGEST>` from GHCR.
+
+### Dependency Automation (Dependabot)
+
+[`.github/dependabot.yml`](.github/dependabot.yml) opens weekly Monday PRs for `pip` (`requirements.txt` / `requirements-dev.txt`), `github-actions`, and `docker` (`Dockerfile` base digest). PRs are never auto-merged and must pass the full CI/CD validation suite.
 
 ## Current Limitations
 

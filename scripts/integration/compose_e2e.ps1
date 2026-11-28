@@ -1,8 +1,21 @@
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
 $composeFile = Join-Path $repoRoot 'compose.integration.yml'
 $proj = "infrapulse-it-$PID-$(Get-Random -Maximum 99999)"
+$imageOverride = $null
+$composeFiles = @('-f', $composeFile)
+if ($env:INFRAPULSE_IMAGE) {
+    $imageOverride = Join-Path ([System.IO.Path]::GetTempPath()) "compose.image_override.$PID.yml"
+    @"
+services:
+  migrate:
+    image: $($env:INFRAPULSE_IMAGE)
+  app:
+    image: $($env:INFRAPULSE_IMAGE)
+"@ | Set-Content -Path $imageOverride -Encoding UTF8
+    $composeFiles += @('-f', $imageOverride)
+}
 
 function Invoke-Checked {
     param([scriptblock]$Command, [string]$ErrorMessage)
@@ -18,14 +31,14 @@ try {
     $env:INTEGRATION_MONITORING_INTERVAL = '5'
 
     Write-Output "--- 1. Start postgres ($proj) ---"
-    Invoke-Checked { docker compose -p $proj -f $composeFile up -d postgres --wait } "Postgres failed to start"
+    Invoke-Checked { docker compose -p $proj @composeFiles up -d postgres --wait } "Postgres failed to start"
 
     Write-Output "--- 2. One-shot migrate (fresh + repeated) ---"
-    Invoke-Checked { docker compose -p $proj -f $composeFile run --rm migrate } "Initial migration failed"
-    Invoke-Checked { docker compose -p $proj -f $composeFile run --rm migrate } "Repeated migration failed"
+    Invoke-Checked { docker compose -p $proj @composeFiles run --rm migrate } "Initial migration failed"
+    Invoke-Checked { docker compose -p $proj @composeFiles run --rm migrate } "Repeated migration failed"
 
     Write-Output "--- 3. Start app & prometheus (monitoring disabled) ---"
-    Invoke-Checked { docker compose -p $proj -f $composeFile up -d app prometheus } "Failed to start app and prometheus"
+    Invoke-Checked { docker compose -p $proj @composeFiles up -d app prometheus } "Failed to start app and prometheus"
     Start-Sleep -Seconds 4
 
     Write-Output "--- 4. Verify /health, /ready, /api/scan, /metrics ---"
@@ -62,7 +75,7 @@ with urllib.request.urlopen('http://127.0.0.1:8000/metrics', timeout=5) as r:
     assert 'infrapulse_monitoring_enabled 0.0' in body
 print('SCAN_ID=' + scan_id)
 "@
-    $scanOutput = docker compose -p $proj -f $composeFile exec -T app python -c $scanScript
+    $scanOutput = docker compose -p $proj @composeFiles exec -T app python -c $scanScript
     if ($LASTEXITCODE -ne 0) { throw "API/metrics verification failed" }
     $scanOutput | Write-Output
     $scanIdMatch = $scanOutput | Select-String -Pattern '^SCAN_ID=(.+)$'
@@ -79,12 +92,12 @@ targets = [t for t in data['data']['activeTargets'] if t['labels'].get('job') ==
 assert targets and targets[0]['health'] == 'up' and targets[0]['labels'].get('instance') == 'app:8000', f'Unexpected targets: {targets}'
 print('PROM_TARGET:', targets[0]['scrapeUrl'], targets[0]['health'], targets[0]['labels'])
 "@
-    Invoke-Checked { docker compose -p $proj -f $composeFile exec -T app python -c $promScript } "Prometheus target verification failed"
+    Invoke-Checked { docker compose -p $proj @composeFiles exec -T app python -c $promScript } "Prometheus target verification failed"
 
     Write-Output "--- 6. Enable monitoring scheduler and verify cycle ---"
     $env:INTEGRATION_MONITORING_ENABLED = 'true'
     $env:INTEGRATION_MONITORING_INTERVAL = '2'
-    Invoke-Checked { docker compose -p $proj -f $composeFile up -d app } "Failed to enable monitoring scheduler"
+    Invoke-Checked { docker compose -p $proj @composeFiles up -d app } "Failed to enable monitoring scheduler"
     Start-Sleep -Seconds 6
     $schedScript = @"
 import urllib.request
@@ -96,11 +109,11 @@ for line in body.splitlines():
     if line.startswith(('infrapulse_monitoring_enabled ', 'infrapulse_monitoring_last_success_timestamp_seconds ', 'infrapulse_monitoring_cycles_total')):
         print('SCHED_METRIC:', line)
 "@
-    Invoke-Checked { docker compose -p $proj -f $composeFile exec -T app python -c $schedScript } "Scheduler metric verification failed"
+    Invoke-Checked { docker compose -p $proj @composeFiles exec -T app python -c $schedScript } "Scheduler metric verification failed"
 
     Write-Output "--- 7. Disable monitoring, restart app, verify DB persistence ---"
     $env:INTEGRATION_MONITORING_ENABLED = 'false'
-    Invoke-Checked { docker compose -p $proj -f $composeFile up -d app } "Failed to restart app"
+    Invoke-Checked { docker compose -p $proj @composeFiles up -d app } "Failed to restart app"
     Start-Sleep -Seconds 4
     $persistScript = @"
 import json, urllib.request
@@ -112,13 +125,14 @@ with urllib.request.urlopen('http://127.0.0.1:8000/api/scans/$scanId', timeout=5
     assert data['status'] == 'completed', f'Unexpected scan state: {data}'
     print('POST_RESTART /api/scans:', data['id'], data['status'])
 "@
-    Invoke-Checked { docker compose -p $proj -f $composeFile exec -T app python -c $persistScript } "Persistence verification failed"
+    Invoke-Checked { docker compose -p $proj @composeFiles exec -T app python -c $persistScript } "Persistence verification failed"
 }
 finally {
     Remove-Item Env:INTEGRATION_MONITORING_ENABLED -ErrorAction SilentlyContinue
     Remove-Item Env:INTEGRATION_MONITORING_INTERVAL -ErrorAction SilentlyContinue
     Write-Output "--- 8. Clean shutdown & volume removal ($proj) ---"
-    docker compose -p $proj -f $composeFile down -v --remove-orphans
+    docker compose -p $proj @composeFiles down -v --remove-orphans
+    if ($imageOverride) { Remove-Item -Force $imageOverride -ErrorAction SilentlyContinue }
     $remC = (docker ps -a --filter "label=com.docker.compose.project=$proj" --format "{{.Names}}") -join ","
     $remV = (docker volume ls --filter "label=com.docker.compose.project=$proj" --format "{{.Name}}") -join ","
     $remN = (docker network ls --filter "label=com.docker.compose.project=$proj" --format "{{.Name}}") -join ","
