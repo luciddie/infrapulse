@@ -1,0 +1,16 @@
+# Registry-only deployment override for InfraPulse (requires Docker Compose v2.20.0+ for !reset).
+# Usage: docker compose -f compose.yml -f compose.deploy.yml [-f compose.telegram.yml] up -d --no-build
+services:
+  migrate:
+    build: !reset null
+    image: ghcr.io/luciddie/infrapulse@${INFRAPULSE_DIGEST:?Set INFRAPULSE_DIGEST}
+    pull_policy: always
+
+  app:
+    build: !reset null
+    image: ghcr.io/luciddie/infrapulse@${INFRAPULSE_DIGEST:?Set INFRAPULSE_DIGEST}
+    pull_policy: always
+    environment:
+      TELEGRAM_ENABLED: ${DEPLOY_TELEGRAM_ENABLED:-false}
+      TELEGRAM_BOT_TOKEN: ${DEPLOY_TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${DEPLOY_TELEGRAM_CHAT_ID:-}

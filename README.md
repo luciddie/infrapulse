@@ -379,6 +379,17 @@ GitHub Actions ([ci.yml](.github/workflows/ci.yml)) validates every pull request
 
 [`.github/dependabot.yml`](.github/dependabot.yml) opens weekly Monday PRs for `pip` (`requirements.txt` / `requirements-dev.txt`), `github-actions`, and `docker` (`Dockerfile` base digest). PRs are never auto-merged and must pass the full CI/CD validation suite.
 
+## Continuous Deployment & Release Management (Stage 13)
+
+InfraPulse supports manual, digest-pinned staging deployment via [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) and [`compose.deploy.yml`](compose.deploy.yml):
+
+- **Registry-only override:** [`compose.deploy.yml`](compose.deploy.yml) removes inherited `build:` definitions (`build: !reset null`, requiring Docker Compose v2.20.0+) and pins both `app` and `migrate` to `ghcr.io/luciddie/infrapulse@sha256:...`.
+- **Two-stage attestation gate:** Before SSH, `deploy.yml` verifies `linux/amd64` architecture and runs independent `gh attestation verify` checks for SLSA Build Provenance and SPDX SBOM from `refs/heads/main`.
+- **Safe server sequencing:** [`scripts/deploy/deploy.sh`](scripts/deploy/deploy.sh) acquires `flock`, validates effective Compose config, quiesces `app`, creates and validates a `pg_dump -Fc` backup, runs `alembic upgrade head` once, validates health/readiness/Prometheus, and atomically updates `release.json`.
+- **Conservative rollback:** [`scripts/deploy/rollback.sh`](scripts/deploy/rollback.sh) and automatic rollback only proceed when the schema revision is unchanged; schema-changing failures enter `recovery_required`.
+
+See [`docs/deployment.md`](docs/deployment.md) for the full operator runbook and Stage 14 server provisioning prerequisites.
+
 ## Current Limitations
 
 - Linux network discovery inspects the kernel neighbour cache (`ip -j neigh show`) rather than performing privileged raw-socket ARP scanning; in Docker bridge mode, only L2 neighbours on the container's own bridge subnet are visible.
